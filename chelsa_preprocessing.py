@@ -6,13 +6,15 @@ import xarray as xr
 import geopandas as gpd
 import os
 import pyproj
-# To avoid error from regionmask on first import:
+import pyproj
 os.environ['PROJ_LIB'] = pyproj.datadir.get_data_dir()
-import regionmask
+import xagg as xa
+
+# Silence xagg prints
+xa.set_options(silent=True)
 
 
 def chelsa_w5e5_agg(shapefile_path, config_path="chelsa_config.ini"):
-    # Load config
     config = configparser.ConfigParser()
     config.read(config_path)
 
@@ -25,7 +27,6 @@ def chelsa_w5e5_agg(shapefile_path, config_path="chelsa_config.ini"):
     convert_temp = config.getboolean("conversion", "convert_temperatures")
     fill_value = 65535
 
-    # Define conversion rules
     conversions = {
         "pr": {"factor": 86400, "offset": 0},
         "tas": {"factor": 1, "offset": -273.15 if convert_temp else 0},
@@ -34,59 +35,55 @@ def chelsa_w5e5_agg(shapefile_path, config_path="chelsa_config.ini"):
         "rsds": {"factor": 1, "offset": 0},
     }
 
-    # Load polygon
     polygon = gpd.read_file(shapefile_path).to_crs("EPSG:4326")
     poly_name = os.path.basename(shapefile_path).split('.')[0]
 
     for var in variables:
         print(f"\n ** Processing variable: {var}")
         files = sorted(glob.glob(f"{base_dir}/{var}/*.nc"))
-
         if not files:
             print(f"** No files found for {var}, skipping.")
             continue
 
-        # Create mask once
-        first_file = xr.open_dataset(files[0])
-        mask = regionmask.Regions([polygon.geometry[0]])
-        frac_mask = mask.mask_3D_frac_approx(first_file[var].isel(time=0))
-        valid_mask = frac_mask.where(frac_mask > 0)
-        first_file.close()
-
         results = []
+        previous_grid = None
+        weightmap = None
 
         for file in tqdm(files, desc=f"→ {var}"):
             ds = xr.open_dataset(file)
-            data = ds[var]
 
-            # Apply conversion
-            factor = conversions[var]["factor"]
-            offset = conversions[var]["offset"]
-            data = data * factor + offset
+            ds[var] = ds[var] * conversions[var]["factor"] + conversions[var]["offset"]
+            ds[var] = ds[var].where(ds[var] != fill_value)
 
-            # Mask fill values
-            data = data.where(data != fill_value)
+            # Extract current lat/lon grid
+            current_grid = (tuple(ds["lat"].values), tuple(ds["lon"].values))
 
-            # Weighted average
-            weighted_sum = (data * valid_mask).sum(dim=("lat", "lon"), skipna=True)
-            total_weight = valid_mask.sum(dim=("lat", "lon"), skipna=True)
-            weighted_mean = weighted_sum / total_weight
+            # Only recalculate weights if grid changes
+            if current_grid != previous_grid:
+                try:
+                    weightmap = xa.pixel_overlaps(ds, polygon)
+                    previous_grid = current_grid
+                except Exception as e:
+                    print(f"\nFailed to generate weight map for {file}: {e}")
+                    ds.close()
+                    continue
 
-            # Format output
-            df = weighted_mean.to_dataframe(name=var).reset_index()
-            df = df[["time", var]]
-            df = round(df, 4)
-            results.append(df)
+            try:
+                agg = xa.aggregate(ds[var], weightmap)
+                df = agg.to_dataframe().reset_index()[["time", var]]
+                df = round(df, 4)
+                results.append(df)
+            except Exception as e:
+                print(f"\nFailed to aggregate {file}: {e}")
+
             ds.close()
 
-        # Combine and save
         final_df = pd.concat(results)
         output_file = os.path.join(output_dir, f"{poly_name}_{var}.csv")
         final_df.to_csv(output_file, index=False)
         print(f"** Saved: {output_file}")
 
     print("\n** Done.")
-
 
 # Example usage
 chelsa_w5e5_agg("/home/phillip/Seafile/EBA-CA/Papers/No3_Issyk-Kul/geodata/kyzylsuu/shp/kyzylsuu.shp")
