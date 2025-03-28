@@ -6,15 +6,15 @@ import xarray as xr
 import geopandas as gpd
 import os
 import pyproj
-import pyproj
-os.environ['PROJ_LIB'] = pyproj.datadir.get_data_dir()
 import xagg as xa
+
+# To avoid PROJ error:
+os.environ['PROJ_LIB'] = pyproj.datadir.get_data_dir()
 
 # Silence xagg prints
 xa.set_options(silent=True)
 
-
-def chelsa_w5e5_agg(shapefile_path, config_path="chelsa_config.ini"):
+def chelsa_w5e5_agg(gpkg_path_or_layer, config_path="chelsa_config.ini", force=False):
     config = configparser.ConfigParser()
     config.read(config_path)
 
@@ -35,8 +35,29 @@ def chelsa_w5e5_agg(shapefile_path, config_path="chelsa_config.ini"):
         "rsds": {"factor": 1, "offset": 0},
     }
 
-    polygon = gpd.read_file(shapefile_path).to_crs("EPSG:4326")
-    poly_name = os.path.basename(shapefile_path).split('.')[0]
+    polygon = gpd.read_file(gpkg_path_or_layer)
+    poly_name = os.path.splitext(os.path.basename(gpkg_path_or_layer))[0]
+    polygon = polygon.to_crs("EPSG:4326")
+
+    # Check if all variable files and elevation file already exist
+    existing_outputs = [os.path.join(output_dir, f"{poly_name}_{var}.csv") for var in variables]
+    elevation_output = os.path.join(output_dir, f"{poly_name}_elevation.csv")
+    all_exist = all(os.path.exists(f) for f in existing_outputs) and os.path.exists(elevation_output)
+
+    if all_exist and not force:
+        print(f"CHELSA output for '{poly_name}' already exists. Skipping.")
+        return
+
+    # Process orography (mean elevation)
+    orog_file = sorted(glob.glob(f"{base_dir}/orog/*.nc"))[0]
+    ds_orog = xr.open_dataset(orog_file)
+    weightmap_orog = xa.pixel_overlaps(ds_orog, polygon)
+    agg_orog = xa.aggregate(ds_orog["orog"], weightmap_orog)
+    mean_elevation = agg_orog.to_dataframe()['orog'].values[0]
+    print(f"Area-weighted mean elevation: {mean_elevation:.2f} m")
+    df_orog = pd.DataFrame({"polygon": [poly_name], "elevation": [round(mean_elevation, 2)]})
+    df_orog.to_csv(elevation_output, index=False)
+    ds_orog.close()
 
     for var in variables:
         print(f"\n ** Processing variable: {var}")
@@ -49,16 +70,14 @@ def chelsa_w5e5_agg(shapefile_path, config_path="chelsa_config.ini"):
         previous_grid = None
         weightmap = None
 
-        for file in tqdm(files, desc=f"→ {var}"):
+        for file in tqdm(files, desc=f"\u2192 {var}"):
             ds = xr.open_dataset(file)
 
             ds[var] = ds[var] * conversions[var]["factor"] + conversions[var]["offset"]
             ds[var] = ds[var].where(ds[var] != fill_value)
 
-            # Extract current lat/lon grid
             current_grid = (tuple(ds["lat"].values), tuple(ds["lon"].values))
 
-            # Only recalculate weights if grid changes
             if current_grid != previous_grid:
                 try:
                     weightmap = xa.pixel_overlaps(ds, polygon)
@@ -86,4 +105,4 @@ def chelsa_w5e5_agg(shapefile_path, config_path="chelsa_config.ini"):
     print("\n** Done.")
 
 # Example usage
-chelsa_w5e5_agg("/home/phillip/Seafile/EBA-CA/Papers/No3_Issyk-Kul/geodata/kyzylsuu/shp/kyzylsuu.shp")
+# chelsa_w5e5_agg("/home/phillip/Seafile/EBA-CA/Papers/No3_Issyk-Kul/geodata/kyzylsuu/kyzylsuu.gpkg")
