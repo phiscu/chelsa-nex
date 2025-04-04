@@ -271,7 +271,7 @@ def adjust_bias(predictand, predictor, datasource='era5',
     else:
         var = 'temp' if predictand.mean().mean() > 100 else 'prec'
 
-    # Initialize correction periods (Switanek-style)
+    # Initialize correction periods
     correction_periods = [
         {'correction_range': ('1979-01-01', '2010-12-31'), 'extraction_range': ('1979-01-01', '1990-12-31')},
     ]
@@ -1160,14 +1160,16 @@ class ClimateScenarios:
             if isinstance(prec_df, pd.Series):
                 prec_df = prec_df.to_frame(name=ensemble_member)
 
-            # Replace values before 2021 with ensemble mean
+            # Separate the pre-2021 data (CHELSA period)
             pre_2021 = temp_df.index < pd.Timestamp('2021-01-01')
 
-            # Extract the correct Series from the ensemble DataFrames
-            temp_series = self.ensemble_mean_temp.iloc[:, 0]  # or use .loc[:, 'column_name'] if you prefer
+            # --- HOTFIX: CHELSA only has data until 2020 ---
+
+            # Extract the ensemble mean data
+            temp_series = self.ensemble_mean_temp.iloc[:, 0]
             prec_series = self.ensemble_mean_prec.iloc[:, 0]
 
-            # Align and replace values
+            # Replace values before 2021 with ensemble mean
             temp_df.loc[pre_2021, ensemble_member] = temp_series.loc[pre_2021]
             prec_df.loc[pre_2021, ensemble_member] = prec_series.loc[pre_2021]
 
