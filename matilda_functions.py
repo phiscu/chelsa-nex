@@ -20,6 +20,15 @@ from matplotlib.legend import Legend
 
 # warnings.filterwarnings("ignore")
 
+def read_era5l(file):
+    """Reads ERA5-Land data, drops redundant columns, and adds DatetimeIndex.
+    Resamples the dataframe to reduce the DatetimeIndex to daily resolution."""
+
+    return pd.read_csv(file, **{
+        'usecols': ['temp', 'prec', 'dt'],
+        'index_col': 'dt',
+        'parse_dates': ['dt']}).resample('D').agg({'temp': 'mean', 'prec': 'sum'})
+
 
 class CMIPDownloader:
     """Class to download spatially averaged CMIP6 data for a given period, variable, and spatial subset."""
