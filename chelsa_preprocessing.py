@@ -105,4 +105,4 @@ def chelsa_w5e5_agg(gpkg_path_or_layer, config_path="chelsa_config.ini", force=F
     print("\n** Done.")
 
 # Example usage
-# chelsa_w5e5_agg("/home/phillip/Seafile/EBA-CA/Papers/No3_Issyk-Kul/geodata/kyzylsuu/kyzylsuu.gpkg")
+chelsa_w5e5_agg("/home/phillip/Seafile/EBA-CA/Papers/No3_Issyk-Kul/geodata/catchments/cholpon_ata/gpkg_glaciers/cholpon_ata_catchment.gpkg")

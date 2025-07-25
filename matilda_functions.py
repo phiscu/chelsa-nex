@@ -1238,25 +1238,25 @@ class ClimateScenarios:
 
 ## Manual run for debugging
 
-# import configparser
-#
-# config = configparser.ConfigParser()
-# config.read('/home/phillip/Seafile/EBA-CA/Repositories/chelsa-nex/config.ini')
-# settings = config['settings']
-#
-# # Extract settings from the configuration file
-# chelsa_dir = settings.get('chelsa_dir')
-# cmip_dir = settings.get('output_dir')
-# polygon_path = settings.get('polygon')
-# gee_project = settings.get('gee_project')
-# download = settings.getboolean('download')
-# show = settings.getboolean('show')
-# load_backup = settings.getboolean('load_backup')
-# processes = settings.getint('processes')
-# starty = settings.getint('start_year')
-# endy = settings.getint('end_year')
-#
-#
+import configparser
+
+config = configparser.ConfigParser()
+config.read('/home/phillip/Seafile/EBA-CA/Repositories/chelsa-nex/config.ini')
+settings = config['settings']
+
+# Extract settings from the configuration file
+chelsa_dir = settings.get('chelsa_dir')
+cmip_dir = settings.get('output_dir')
+polygon_path = settings.get('polygon')
+gee_project = settings.get('gee_project')
+download = settings.getboolean('download')
+show = settings.getboolean('show')
+load_backup = settings.getboolean('load_backup')
+processes = settings.getint('processes')
+starty = settings.getint('start_year')
+endy = settings.getint('end_year')
+
+
 # instance = ClimateScenarios(output=cmip_dir,
 #                             chelsa_dir=chelsa_dir,
 #                             polygon_path=polygon_path,
@@ -1270,3 +1270,17 @@ class ClimateScenarios:
 #                             plots=True)
 #
 # instance.complete_workflow()
+
+instance = ClimateScenarios(output='/home/phillip/Seafile/EBA-CA/Repositories/chelsa-nex/debugDir',
+                            chelsa_dir=chelsa_dir,
+                            polygon_path=polygon_path,
+                            gee_project=gee_project,
+                            download=True,
+                            load_backup=False,
+                            show=show,
+                            starty=starty,
+                            endy=endy,
+                            processes=processes,
+                            plots=False)
+
+instance.complete_workflow()
