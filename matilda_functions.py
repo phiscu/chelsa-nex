@@ -351,14 +351,14 @@ class CMIP6PolygonProcessor:
     Fork of the CMIP6DataProcessor to work with a general polygon and CHELSA-W5E5 data instead of weather stations.
     """
 
-    def __init__(self, polygon_path, gee_project, starty, endy, cmip_dir, input_dir, processes):
+    def __init__(self, polygon_path, gee_project, starty, endy, cmip_dir, reanalysis_dir, processes):
         self.polygon_path = polygon_path
         self.poly_name = os.path.splitext(os.path.basename(polygon_path))[0]
         self.gee_project = gee_project
         self.starty = starty
         self.endy = endy
         self.cmip_dir = cmip_dir
-        self.input_dir = input_dir
+        self.reanalysis_dir = reanalysis_dir
         self.processes = processes
 
     def initialize_target(self):
@@ -389,8 +389,8 @@ class CMIP6PolygonProcessor:
         print('Running bias adjustment routine...')
 
         # Load CHELSA data
-        tas_chelsa = pd.read_csv(f'{self.input_dir}{self.poly_name}_tas.csv', index_col='time', parse_dates=True)
-        pr_chelsa = pd.read_csv(f'{self.input_dir}{self.poly_name}_pr.csv', index_col='time', parse_dates=True)
+        tas_chelsa = pd.read_csv(f'{self.reanalysis_dir}{self.poly_name}_tas.csv', index_col='time', parse_dates=True)
+        pr_chelsa = pd.read_csv(f'{self.reanalysis_dir}{self.poly_name}_pr.csv', index_col='time', parse_dates=True)
 
         train_start_temp = str(tas_chelsa.first_valid_index())
         train_end_temp = str(tas_chelsa.last_valid_index())
@@ -1024,7 +1024,7 @@ def summary_dict(results_dict: dict):
 
 
 class ClimateScenarios:
-    def __init__(self, output, chelsa_dir, polygon_path, gee_project='matilda-edu', download=False, load_backup=False, show=True,
+    def __init__(self, output, reanalysis_dir, polygon_path, gee_project='matilda-edu', download=False, load_backup=False, show=True,
                  starty=1979, endy=2100, processes=5, plots=True):
         self.polygon_path = polygon_path
         self.poly_name = os.path.splitext(os.path.basename(polygon_path))[0]
@@ -1036,13 +1036,13 @@ class ClimateScenarios:
         self.starty = starty
         self.endy = endy
         self.processes = processes
-        self.input_dir = chelsa_dir
+        self.reanalysis_dir = reanalysis_dir
         self.plots = plots
 
     def cmip6_data_processing(self):
         cmip_dir = os.path.join(self.output, 'raw/')
         self.cmip6_polygon = CMIP6PolygonProcessor(self.polygon_path, self.gee_project, self.starty, self.endy,
-                                                   cmip_dir, self.input_dir, self.processes)
+                                                   cmip_dir, self.reanalysis_dir, self.processes)
         print(f'CMIP6PolygonProcessor instance for polygon "{self.poly_name}" configured.')
 
         if self.download:
@@ -1064,9 +1064,9 @@ class ClimateScenarios:
 
     def create_plots(self):
         # Load CHELSA data as "target" for comparison
-        tas_chelsa = pd.read_csv(os.path.join(self.input_dir, f'{self.poly_name}_tas.csv'), index_col='time',
+        tas_chelsa = pd.read_csv(os.path.join(self.reanalysis_dir, f'{self.poly_name}_tas.csv'), index_col='time',
                                  parse_dates=True)
-        pr_chelsa = pd.read_csv(os.path.join(self.input_dir, f'{self.poly_name}_pr.csv'), index_col='time',
+        pr_chelsa = pd.read_csv(os.path.join(self.reanalysis_dir, f'{self.poly_name}_pr.csv'), index_col='time',
                                 parse_dates=True)
 
         plot_dir = os.path.join(self.output, 'Plots/')
@@ -1258,7 +1258,7 @@ endy = settings.getint('end_year')
 
 
 # instance = ClimateScenarios(output=cmip_dir,
-#                             chelsa_dir=chelsa_dir,
+#                             reanalysis_dir=chelsa_dir,
 #                             polygon_path=polygon_path,
 #                             gee_project=gee_project,
 #                             download=True,
@@ -1272,7 +1272,7 @@ endy = settings.getint('end_year')
 # instance.complete_workflow()
 
 instance = ClimateScenarios(output='/home/phillip/Seafile/EBA-CA/Repositories/chelsa-nex/debugDir',
-                            chelsa_dir=chelsa_dir,
+                            reanalysis_dir=chelsa_dir,
                             polygon_path=polygon_path,
                             gee_project=gee_project,
                             download=True,

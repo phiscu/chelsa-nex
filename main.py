@@ -46,7 +46,7 @@ def main():
         # Update polygon path in ClimateScenarios config
         instance = ClimateScenarios(
             output=cmip_dir,
-            chelsa_dir=chelsa_dir,
+            reanalysis_dir=chelsa_dir,
             polygon_path=gpkg,
             gee_project=gee_project,
             download=download,
