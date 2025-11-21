@@ -14,17 +14,17 @@ os.environ['PROJ_LIB'] = pyproj.datadir.get_data_dir()
 # Silence xagg prints
 xa.set_options(silent=True)
 
-def chelsa_w5e5_agg(gpkg_path_or_layer, config_path="chelsa_config.ini", force=False):
+def chelsa_w5e5_agg(gpkg_path_or_layer, config_path="config.ini", force=False):
     config = configparser.ConfigParser()
     config.read(config_path)
 
-    base_dir = config["paths"]["base_dir"]
-    target_subdir = config.get("output", "target_dir", fallback="aggregates")
+    base_dir = config["reanalysis"]["chelsa_base_dir"]
+    target_subdir = config.get("reanalysis", "chelsa_target_dir", fallback="aggregates")
     output_dir = os.path.join(base_dir, target_subdir)
     os.makedirs(output_dir, exist_ok=True)
 
-    variables = [v.strip() for v in config["variables"]["vars"].split(",")]
-    convert_temp = config.getboolean("conversion", "convert_temperatures")
+    variables = [v.strip() for v in config["reanalysis"]["chelsa_vars"].split(",")]
+    convert_temp = config.getboolean("reanalysis", "convert_temperatures")
     fill_value = 65535
 
     conversions = {

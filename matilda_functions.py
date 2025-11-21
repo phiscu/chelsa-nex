@@ -5,6 +5,7 @@ import requests
 import concurrent.futures
 import seaborn as sns
 import probscale
+import math
 import matplotlib.pyplot as plt
 import pandas as pd
 import warnings
@@ -21,13 +22,20 @@ from matplotlib.legend import Legend
 # warnings.filterwarnings("ignore")
 
 def read_era5l(file):
-    """Reads ERA5-Land data, drops redundant columns, and adds DatetimeIndex.
-    Resamples the dataframe to reduce the DatetimeIndex to daily resolution."""
+    """Reads ERA5-Land data, standardizes to match CHELSA format for further processing"""
 
-    return pd.read_csv(file, **{
-        'usecols': ['temp', 'prec', 'dt'],
-        'index_col': 'dt',
-        'parse_dates': ['dt']}).resample('D').agg({'temp': 'mean', 'prec': 'sum'})
+    # Try to read 'dt' if available, otherwise fall back to 'date'
+    temp_df = pd.read_csv(file, nrows=1)
+    time_col = 'dt' if 'dt' in temp_df.columns else 'date'
+
+    df = pd.read_csv(file, usecols=['temp', 'prec', time_col], parse_dates=[time_col])
+    df = df.set_index(time_col).resample('D').agg({'temp': 'mean', 'prec': 'sum'})
+    df = df.rename(columns={'temp': 'tas', 'prec': 'pr'})
+    df['tas'] = df['tas'].round(2)
+    df['pr'] = df['pr'].round(4)
+    df.index.name = "time"
+    return df
+
 
 
 class CMIPDownloader:
@@ -264,37 +272,79 @@ class CMIPProcessor:
 
         return ssp2_full, ssp5_full
 
+def build_data_chunks(train_start='1950-01-02'):
+    """
+    Constructs a list of non-overlapping correction and extraction periods for iterative bias adjustment in discrete
+    chunks of data.
 
-def adjust_bias(predictand, predictor, datasource='era5',
-                train_start='1979-01-01', train_end='2022-12-31',
+    The periods follow a standardized decadal pattern:
+    - The first period starts at the specified `train_start` date and spans 30 years for correction,
+      with a 10-year extraction window.
+    - Subsequent extraction periods follow full decades (e.g., 1981–1990, 1991–2000, ...),
+      with corresponding 30-year correction windows centered around the extraction decade.
+    - The final period covers 2081–2100 for extraction and 2071–2100 for correction.
+
+    Parameters
+    ----------
+    train_start : str, optional
+        The starting date of the training data in 'YYYY-MM-DD' format. Default is '1950-01-02'.
+
+    Returns
+    -------
+    correction_periods : list of dict
+        A list of dictionaries, each with keys:
+        - 'correction_range': (str, str), start and end dates of the correction window.
+        - 'extraction_range': (str, str), start and end dates of the extraction window.
+    """
+    train_start_year = pd.to_datetime(train_start).year
+
+    def round_up10(number):
+        return math.ceil(number / 10) * 10
+
+    decade_start = round_up10(train_start_year)
+    correction_periods = []
+
+    # Define the first correction period based on the train start year
+    correction_periods.append({'correction_range': (train_start, f'{decade_start + 30}-12-31'),
+                               'extraction_range': (train_start, f'{decade_start + 10}-12-31')})
+
+    # Define the standard extraction decades
+    for decade_start in range(decade_start + 1, 2081, 10):
+        extraction_start = decade_start
+        extraction_end = decade_start + 9
+
+        correction_start = extraction_start - 10
+        correction_end = extraction_end + 10
+
+        # Only include periods where the correction window fits the available data
+        if correction_start >= train_start_year:
+            correction_periods.append({
+                'correction_range': (f'{correction_start}-01-01', f'{correction_end}-12-31'),
+                'extraction_range': (f'{extraction_start}-01-01', f'{extraction_end}-12-31')
+            })
+
+    # Define the last extraction period
+    correction_periods.append({'correction_range': ('2071-01-01', '2100-12-31'),
+                               'extraction_range': ('2081-01-01', '2100-12-31')})
+
+    return correction_periods
+
+def adjust_bias(predictand, predictor, datasource='era5l',
+                train_start='1950-01-02', train_end='2024-12-31',
                 method='normal_mapping'):
     """
     Adjusts for the bias between target data and the historic CMIP6 model runs.
-    Optionally replaces training period with CHELSA observations (1979–2016) for consistent output.
+    Optionally replaces training period with reanalysis for consistent output.
     """
 
-    # Read predictor data
-    if datasource == 'era5':
-        predictor = read_era5l(predictor)
-        var = 'temp' if predictand.mean().mean() > 100 else 'prec'
-    elif datasource == 'chelsa':
-        var = 'tas' if predictand.mean().mean() > 100 else 'pr'
-    else:
-        var = 'temp' if predictand.mean().mean() > 100 else 'prec'
+    # Convert train_start to datetime and extract the year
+    train_start_year = pd.to_datetime(train_start).year
 
-    # Initialize correction periods
-    correction_periods = [
-        {'correction_range': ('1979-01-01', '2010-12-31'), 'extraction_range': ('1979-01-01', '1990-12-31')},
-    ]
-    for decade_start in range(1991, 2090, 10):
-        correction_periods.append({
-            'correction_range': (f"{decade_start - 10}-01-01", f"{decade_start + 19}-12-31"),
-            'extraction_range': (f"{decade_start}-01-01", f"{decade_start + 9}-12-31")
-        })
-    correction_periods.append({
-        'correction_range': ('2081-01-01', '2100-12-31'),
-        'extraction_range': ('2091-01-01', '2100-12-31')
-    })
+    # Read predictor data
+    var = 'tas' if predictand.mean().mean() > 100 else 'pr'
+
+    # Build discrete chunks of data for bias correction
+    correction_periods = build_data_chunks(train_start)
 
     # Initialize empty DataFrame for corrected data
     corrected_data = pd.DataFrame()
@@ -327,14 +377,12 @@ def adjust_bias(predictand, predictor, datasource='era5',
 
         corrected_data = pd.concat([corrected_data, data_corr])
 
-    # Replace 1979–2016 with CHELSA if applicable
+    # Replace part of the data with reanalysis if applicable
     if datasource == 'chelsa':
-        # Extract raw and adjusted CMIP6 for training period (for later comparison)
-        raw_train = predictand.loc['1979-01-01':'2016-12-31']
-        corrected_train = corrected_data.loc['1979-01-01':'2016-12-31']
+        raw_train = predictand.loc[train_start:'2016-12-31']
+        corrected_train = corrected_data.loc[train_start:'2016-12-31']
 
-        # Extract CHELSA data and replicate across columns
-        predictor_hist = predictor.loc['1979-01-01':'2016-12-31', var].to_frame()
+        predictor_hist = predictor.loc[train_start:'2016-12-31', var].to_frame()
         predictor_hist = pd.DataFrame(
             np.tile(predictor_hist.values, (1, len(predictand.columns))),
             columns=predictand.columns,
@@ -342,8 +390,26 @@ def adjust_bias(predictand, predictor, datasource='era5',
         )
         predictor_hist.index.name = 'TIMESTAMP'
 
-        # Combine with corrected future data
         corrected_future = corrected_data.loc['2017-01-01':]
+        corrected_data = pd.concat([predictor_hist, corrected_future])
+        corrected_data.sort_index(inplace=True)
+        corrected_data.index.name = 'TIMESTAMP'
+
+        return corrected_data, raw_train, corrected_train
+
+    elif datasource == 'era5l':
+        raw_train = predictand.loc[train_start:train_end]
+        corrected_train = corrected_data.loc[(corrected_data.index >= train_start) & (corrected_data.index <= train_end)]
+
+        predictor_hist = predictor.loc[train_start:train_end, var].to_frame()
+        predictor_hist = pd.DataFrame(
+            np.tile(predictor_hist.values, (1, len(predictand.columns))),
+            columns=predictand.columns,
+            index=predictor_hist.index
+        )
+        predictor_hist.index.name = 'TIMESTAMP'
+
+        corrected_future = corrected_data.loc[train_end:].copy()
         corrected_data = pd.concat([predictor_hist, corrected_future])
         corrected_data.sort_index(inplace=True)
         corrected_data.index.name = 'TIMESTAMP'
@@ -356,19 +422,19 @@ def adjust_bias(predictand, predictor, datasource='era5',
         return corrected_data
 
 
-
 class CMIP6PolygonProcessor:
     """
     Fork of the CMIP6DataProcessor to work with a general polygon and CHELSA-W5E5 data instead of weather stations.
     """
 
-    def __init__(self, polygon_path, gee_project, starty, endy, cmip_dir, reanalysis_dir, processes):
+    def __init__(self, polygon_path, gee_project, starty, endy, cmip_dir, reanalysis, reanalysis_dir, processes):
         self.polygon_path = polygon_path
         self.poly_name = os.path.splitext(os.path.basename(polygon_path))[0]
         self.gee_project = gee_project
         self.starty = starty
         self.endy = endy
         self.cmip_dir = cmip_dir
+        self.reanalysis = reanalysis
         self.reanalysis_dir = reanalysis_dir
         self.processes = processes
 
@@ -399,32 +465,48 @@ class CMIP6PolygonProcessor:
         self.process_cmip6_data()
         print('Running bias adjustment routine...')
 
-        # Load CHELSA data
-        tas_chelsa = pd.read_csv(f'{self.reanalysis_dir}{self.poly_name}_tas.csv', index_col='time', parse_dates=True)
-        pr_chelsa = pd.read_csv(f'{self.reanalysis_dir}{self.poly_name}_pr.csv', index_col='time', parse_dates=True)
+        if self.reanalysis == 'era5l':
+            # Load ERA5-Land data
+            era5l_file = os.path.join(self.reanalysis_dir, f"era5l_{self.poly_name}.csv")
+            era5l_data = read_era5l(era5l_file)
+            tas_target = pd.DataFrame(era5l_data['tas'])
+            pr_target = pd.DataFrame(era5l_data['pr'])
 
-        train_start_temp = str(tas_chelsa.first_valid_index())
-        train_end_temp = str(tas_chelsa.last_valid_index())
-        train_start_prec = str(pr_chelsa.first_valid_index())
-        train_end_prec = str(pr_chelsa.last_valid_index())
+            train_start_temp = str(tas_target.first_valid_index())
+            train_end_temp = str(tas_target.last_valid_index())
+            train_start_prec = str(pr_target.first_valid_index())
+            train_end_prec = str(pr_target.last_valid_index())
+
+        elif self.reanalysis == 'chelsa':
+            # Load CHELSA data
+            tas_target = pd.read_csv(f'{self.reanalysis_dir}{self.poly_name}_tas.csv', index_col='time', parse_dates=True)
+            pr_target = pd.read_csv(f'{self.reanalysis_dir}{self.poly_name}_pr.csv', index_col='time', parse_dates=True)
+
+            train_start_temp = str(tas_target.first_valid_index())
+            train_end_temp = str(tas_target.last_valid_index())
+            train_start_prec = str(pr_target.first_valid_index())
+            train_end_prec = str(pr_target.last_valid_index())
+
+        else:
+            raise ValueError("Unsupported reanalysis data source. Use 'era5l' or 'chelsa'.")
 
         # Temperature bias adjustment
         self.ssp2_tas, raw2_tas_train, adj2_tas_train = adjust_bias(
-            self.ssp2_tas_raw, tas_chelsa, datasource='chelsa',
+            self.ssp2_tas_raw, tas_target, datasource=self.reanalysis,
             train_start=train_start_temp, train_end=train_end_temp
         )
         self.ssp5_tas, raw5_tas_train, adj5_tas_train = adjust_bias(
-            self.ssp5_tas_raw, tas_chelsa, datasource='chelsa',
+            self.ssp5_tas_raw, tas_target, datasource=self.reanalysis,
             train_start=train_start_temp, train_end=train_end_temp
         )
 
         # Precipitation bias adjustment
         self.ssp2_pr, raw2_pr_train, adj2_pr_train = adjust_bias(
-            self.ssp2_pr_raw, pr_chelsa, datasource='chelsa',
+            self.ssp2_pr_raw, pr_target, datasource=self.reanalysis,
             train_start=train_start_prec, train_end=train_end_prec
         )
         self.ssp5_pr, raw5_pr_train, adj5_pr_train = adjust_bias(
-            self.ssp5_pr_raw, pr_chelsa, datasource='chelsa',
+            self.ssp5_pr_raw, pr_target, datasource=self.reanalysis,
             train_start=train_start_prec, train_end=train_end_prec
         )
 
@@ -450,14 +532,14 @@ class CMIP6PolygonProcessor:
                 'SSP2_adjusted_train': adj2_tas_train,
                 'SSP5_raw_train': raw5_tas_train,
                 'SSP5_adjusted_train': adj5_tas_train,
-                'reference': tas_chelsa.loc[train_start_temp:train_end_temp]
+                'reference': tas_target.loc[train_start_temp:train_end_temp]
             },
             'pr': {
                 'SSP2_raw_train': raw2_pr_train,
                 'SSP2_adjusted_train': adj2_pr_train,
                 'SSP5_raw_train': raw5_pr_train,
                 'SSP5_adjusted_train': adj5_pr_train,
-                'reference': pr_chelsa.loc[train_start_prec:train_end_prec]
+                'reference': pr_target.loc[train_start_prec:train_end_prec]
             }
         }
 
@@ -1035,7 +1117,7 @@ def summary_dict(results_dict: dict):
 
 
 class ClimateScenarios:
-    def __init__(self, output, reanalysis_dir, polygon_path, gee_project='matilda-edu', download=False, load_backup=False, show=True,
+    def __init__(self, output, reanalysis_dir, polygon_path, gee_project='matilda-edu', reanalysis='era5l', download=False, load_backup=False, show=True,
                  starty=1979, endy=2100, processes=5, plots=True):
         self.polygon_path = polygon_path
         self.poly_name = os.path.splitext(os.path.basename(polygon_path))[0]
@@ -1047,13 +1129,14 @@ class ClimateScenarios:
         self.starty = starty
         self.endy = endy
         self.processes = processes
+        self.reanalysis = reanalysis
         self.reanalysis_dir = reanalysis_dir
         self.plots = plots
 
     def cmip6_data_processing(self):
         cmip_dir = os.path.join(self.output, 'raw/')
         self.cmip6_polygon = CMIP6PolygonProcessor(self.polygon_path, self.gee_project, self.starty, self.endy,
-                                                   cmip_dir, self.reanalysis_dir, self.processes)
+                                                   cmip_dir, self.reanalysis, self.reanalysis_dir, self.processes)
         print(f'CMIP6PolygonProcessor instance for polygon "{self.poly_name}" configured.')
 
         if self.download:
@@ -1074,54 +1157,68 @@ class ClimateScenarios:
         print(f'Data for "{self.poly_name}" rounded to save storage space.')
 
     def create_plots(self):
-        # Load CHELSA data as "target" for comparison
-        tas_chelsa = pd.read_csv(os.path.join(self.reanalysis_dir, f'{self.poly_name}_tas.csv'), index_col='time',
-                                 parse_dates=True)
-        pr_chelsa = pd.read_csv(os.path.join(self.reanalysis_dir, f'{self.poly_name}_pr.csv'), index_col='time',
-                                parse_dates=True)
+        # Load reanalysis data as "target" for comparison
+        if self.reanalysis == 'era5l':
+            # Load ERA5-Land data
+            era5l_file = os.path.join(self.reanalysis_dir, f"era5l_{self.poly_name}.csv")
+            era5l_data = read_era5l(era5l_file)
+            tas_reanalysis = pd.DataFrame(era5l_data['tas'])
+            pr_reanalysis = pd.DataFrame(era5l_data['pr'])
+            reanalysis_label = 'ERA5-Land'
+
+        elif self.reanalysis == 'chelsa':
+            # Load CHELSA-W5E5 data
+            tas_reanalysis = pd.read_csv(os.path.join(self.reanalysis_dir, f'{self.poly_name}_tas.csv'), index_col='time',
+                                     parse_dates=True)
+            pr_reanalysis = pd.read_csv(os.path.join(self.reanalysis_dir, f'{self.poly_name}_pr.csv'), index_col='time',
+                                    parse_dates=True)
+            reanalysis_label = 'CHELSA-W5E5'
+
+        else:
+            raise ValueError(f"Unsupported reanalysis type: {self.reanalysis}. Supported types are 'era5l' and 'chelsa'.")
 
         plot_dir = os.path.join(self.output, 'Plots/')
 
-        cmip_plot_combined(data=self.temp_cmip, target=tas_chelsa,
+        cmip_plot_combined(data=self.temp_cmip, target=tas_reanalysis,
                            title=f'"{self.poly_name}" - 5y Rolling Mean of Annual Air Temperature',
-                           target_label='CHELSA-W5E5',
+                           target_label=reanalysis_label,
                            filename=f'cmip6_bias_adjustment_{self.poly_name}_temperature.png', show=self.show,
                            intv_mean='YE', rolling=5, out_dir=plot_dir)
-        cmip_plot_combined(data=self.prec_cmip, target=pr_chelsa.dropna(),
+        cmip_plot_combined(data=self.prec_cmip, target=pr_reanalysis.dropna(),
                            title=f'"{self.poly_name}" - 5y Rolling Mean of Annual Precipitation',
                            precip=True,
-                           target_label='CHELSA-W5E5',
+                           target_label=reanalysis_label,
                            filename=f'cmip6_bias_adjustment_{self.poly_name}_precipitation.png', show=self.show,
                            intv_sum='YE', rolling=5, out_dir=plot_dir)
         print(f'Figures for CMIP6 bias adjustment for "{self.poly_name}" created.')
 
-        cmip_plot_ensemble(self.temp_cmip, tas_chelsa['tas'], intv_mean='YE', show=self.show,
-                           out_dir=plot_dir, target_label="CHELSA-W5E5",
+        cmip_plot_ensemble(self.temp_cmip, tas_reanalysis['tas'], intv_mean='YE', show=self.show,
+                           out_dir=plot_dir, target_label=reanalysis_label,
                            filename=f'cmip6_ensemble_{self.poly_name}', site_label=self.poly_name)
-        cmip_plot_ensemble(self.prec_cmip, pr_chelsa['pr'].dropna(), precip=True, intv_sum='YE', show=self.show,
-                           out_dir=plot_dir, target_label="CHELSA-W5E5", site_label=self.poly_name,
+        cmip_plot_ensemble(self.prec_cmip, pr_reanalysis['pr'].dropna(), precip=True, intv_sum='YE', show=self.show,
+                           out_dir=plot_dir, target_label=reanalysis_label, site_label=self.poly_name,
                            filename=f'cmip6_ensemble_{self.poly_name}')
         print(f'Figures for CMIP6 ensembles for "{self.poly_name}" created.')
 
-        start_temp = tas_chelsa.first_valid_index().year
-        end_temp = tas_chelsa.last_valid_index().year
-        start_prec = pr_chelsa.dropna().first_valid_index().year
-        end_prec = pr_chelsa.dropna().last_valid_index().year
+        start_temp = tas_reanalysis.first_valid_index().year
+        end_temp = tas_reanalysis.last_valid_index().year
+        start_prec = pr_reanalysis.dropna().first_valid_index().year
+        end_prec = pr_reanalysis.dropna().last_valid_index().year
 
-        pp_matrix(self.training_dict['tas']['SSP2_raw_train'], tas_chelsa['tas'], self.training_dict['tas']['SSP2_adjusted_train'], scenario='SSP2',
-                  starty=start_temp, endy=end_temp, target_label='CHELSA-W5E5', out_dir=plot_dir,
+        pp_matrix(self.training_dict['tas']['SSP2_raw_train'], tas_reanalysis['tas'], self.training_dict['tas']['SSP2_adjusted_train'], scenario='SSP2',
+                  starty=start_temp, endy=end_temp, target_label=reanalysis_label, out_dir=plot_dir,
                   show=self.show, site=self.poly_name)
-        pp_matrix(self.training_dict['tas']['SSP5_raw_train'], tas_chelsa['tas'], self.training_dict['tas']['SSP5_adjusted_train'], scenario='SSP5',
-                  starty=start_temp, endy=end_temp, target_label='CHELSA-W5E5', out_dir=plot_dir,
+        pp_matrix(self.training_dict['tas']['SSP5_raw_train'], tas_reanalysis['tas'], self.training_dict['tas']['SSP5_adjusted_train'], scenario='SSP5',
+                  starty=start_temp, endy=end_temp, target_label=reanalysis_label, out_dir=plot_dir,
                   show=self.show, site=self.poly_name)
 
-        pp_matrix(self.training_dict['pr']['SSP2_raw_train'], pr_chelsa['pr'].dropna().astype(float),
+        pp_matrix(self.training_dict['pr']['SSP2_raw_train'], pr_reanalysis['pr'].dropna().astype(float),
                   self.training_dict['pr']['SSP2_adjusted_train'], precip=True, starty=start_prec, endy=end_prec,
-                  target_label='CHELSA-W5E5', scenario='SSP2', out_dir=plot_dir,
+                  target_label=reanalysis_label, scenario='SSP2', out_dir=plot_dir,
                   show=self.show, site=self.poly_name)
-        pp_matrix(self.training_dict['pr']['SSP5_raw_train'], pr_chelsa['pr'].dropna().astype(float),
+        pp_matrix(self.training_dict['pr']['SSP5_raw_train'], pr_reanalysis['pr'].dropna().astype(float),
                   self.training_dict['pr']['SSP5_adjusted_train'], precip=True, starty=start_prec, endy=end_prec,
-                  target_label='CHELSA-W5E5', scenario='SSP5', out_dir=plot_dir,
+                  target_label=reanalysis_label, scenario='SSP5', out_dir=plot_dir,
                   show=self.show, site=self.poly_name)
         print(f'Figures for CMIP6 bias adjustment performance for "{self.poly_name}" created.')
 
@@ -1219,23 +1316,27 @@ class ClimateScenarios:
         print(f'Output .dat files for "{self.poly_name}" written.')
 
     def complete_workflow(self):
-        if self.load_backup:
-            self.temp_cmip = pickle_to_dict(
-                os.path.join(self.output, f'back_ups/temp_{self.poly_name}_adjusted.pickle'))
-            self.prec_cmip = pickle_to_dict(
-                os.path.join(self.output, f'back_ups/prec_{self.poly_name}_adjusted.pickle'))
-            self.training_dict = pickle_to_dict(os.path.join(self.output, f'back_ups/training_{self.poly_name}.pickle'))
+        backup_dir = os.path.join(self.output, 'back_ups')
+        temp_file = os.path.join(backup_dir, f'temp_{self.poly_name}_adjusted.pickle')
+        prec_file = os.path.join(backup_dir, f'prec_{self.poly_name}_adjusted.pickle')
+        train_file = os.path.join(backup_dir, f'training_{self.poly_name}.pickle')
+
+        if self.load_backup and all(os.path.exists(f) for f in [temp_file, prec_file, train_file]):
+            self.temp_cmip = pickle_to_dict(temp_file)
+            self.prec_cmip = pickle_to_dict(prec_file)
+            self.training_dict = pickle_to_dict(train_file)
             print(f'Back-up of adjusted data for "{self.poly_name}" found and loaded.')
 
         else:
+            if self.load_backup:
+                print(f'Back-up files for "{self.poly_name}" are missing. Reprocessing...')
+
             self.cmip6_data_processing()
             self.data_checks()
-            dict_to_pickle(self.temp_cmip,
-                           os.path.join(self.output, f'back_ups/temp_{self.poly_name}_adjusted.pickle'))
-            dict_to_pickle(self.prec_cmip,
-                           os.path.join(self.output, f'back_ups/prec_{self.poly_name}_adjusted.pickle'))
-            dict_to_pickle(self.training_dict,
-                           os.path.join(self.output, f'back_ups/training_{self.poly_name}.pickle'))
+            os.makedirs(backup_dir, exist_ok=True)
+            dict_to_pickle(self.temp_cmip, temp_file)
+            dict_to_pickle(self.prec_cmip, prec_file)
+            dict_to_pickle(self.training_dict, train_file)
             print(f'Back-up of adjusted data for "{self.poly_name}" written.')
 
         if self.plots:
@@ -1248,7 +1349,7 @@ class ClimateScenarios:
 
 
 ## Manual run for debugging
-#
+
 # import configparser
 #
 # config = configparser.ConfigParser()
@@ -1257,6 +1358,7 @@ class ClimateScenarios:
 #
 # # Extract settings from the configuration file
 # chelsa_dir = settings.get('chelsa_dir')
+# era5l_dir = settings.get('era5l_dir')
 # cmip_dir = settings.get('output_dir')
 # polygon_path = settings.get('polygon')
 # gee_project = settings.get('gee_project')
@@ -1283,15 +1385,16 @@ class ClimateScenarios:
 # instance.complete_workflow()
 #
 # instance = ClimateScenarios(output='/home/phillip/Seafile/EBA-CA/Repositories/chelsa-nex/debugDir',
-#                             reanalysis_dir=chelsa_dir,
+#                             reanalysis='era5l',
+#                             reanalysis_dir=era5l_dir,
 #                             polygon_path=polygon_path,
 #                             gee_project=gee_project,
-#                             download=True,
+#                             download=False,
 #                             load_backup=False,
 #                             show=show,
 #                             starty=starty,
 #                             endy=endy,
 #                             processes=processes,
-#                             plots=False)
+#                             plots=True)
 #
 # instance.complete_workflow()
