@@ -1,7 +1,7 @@
 # chelsa-nex
 
 ## Overview
-This repository provides a reproducible workflow for building bias‑corrected climate scenarios from the NASA NEX‑GDDP‑CMIP6 archive. The pipeline downloads or aggregates reference reanalysis data (ERA5‑Land or CHELSA‑W5E5), computes area‑weighted summaries for glacier polygons, and applies scaled distribution mapping to the CMIP6 ensemble. Outputs include daily precipitation and temperature time series that can feed MATILDA or other downstream hydrological models. NEX‑GDDP‑CMIP6 is accessed directly from Google Earth Engine (dataset description: [NASA/ORNL NEX‑GDDP‑CMIP6](https://developers.google.com/earth-engine/datasets/catalog/NASA_GDDP_CMIP6)).
+This repository provides a reproducible workflow for building bias‑corrected climate scenarios from the [NASA NEX-GDDP-CMIP6](https://doi.org/10.1038/s41597-022-01393-4) archive accessed via [Google Earth Engine](https://developers.google.com/earth-engine/datasets/catalog/NASA_GDDP_CMIP6). The pipeline downloads (ERA5-Land) or aggregates (CHELSA‑W5E5) reference reanalysis data, computes area‑weighted summaries for glacier polygons, and applies scaled distribution mapping to the CMIP6 ensemble. Outputs include daily precipitation and temperature time series that can feed MATILDA or other downstream hydrological models.
 
 The workflow is currently tailored to individual glaciers identified by the [Randolph Glacier Inventory v6](https://www.glims.org/RGI/) (RGI) and is designed to download, preprocess, and bias adjust climate data for those outlines (e.g., to force GloGEM or other glacier models). Batch jobs iterate over one or more RGI‑labeled glacier polygons, either as a single file or a directory of GeoPackages, and produce ready‑to‑use forcing for glacier modeling.
 
